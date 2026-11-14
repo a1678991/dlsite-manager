@@ -1294,3 +1294,21 @@
   verification remains in this work log and the completed plans. Documentation
   validation: whitespace check and exact GitHub/local release-body comparison;
   no code tests were needed for this prose-only change.
+
+- Added OS credential store support (design:
+  `docs/designs/2026-11-15.00-os-credential-store.md`). `dm-credentials` now
+  seals the credential vault (`vault.sealed`, XChaCha20-Poly1305) with a
+  32-byte key kept in the OS store through `keyring` 4 (`v1`: macOS Keychain,
+  Windows Credential Manager, Linux Secret Service), so the app has no
+  per-OS code. One OS entry is used because sessions (~4 KiB) exceed the
+  Windows 2560-byte blob limit. `open_credential_store` imports and removes a
+  legacy `vault.json`, never downgrades once a sealed vault exists, and falls
+  back to the plaintext file only when the OS store is unreachable before
+  that. Tauri startup uses it and records `credentialBackend`
+  (`os_store`/`local_file`, added to the privacy allowlist). Validation:
+  `cargo fmt --all --check`; `cargo clippy --workspace --all-targets
+  -- -D warnings`; `cargo clippy -p dm-credentials --all-targets -- -D
+  warnings` for `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`;
+  `cargo test --workspace --locked`; the ignored real-store test against GNOME
+  Keyring; debug-app migration and no-session-bus fallback on Linux. Windows
+  and macOS runtime and KWallet were not exercised.

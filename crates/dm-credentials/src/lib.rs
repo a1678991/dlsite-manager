@@ -1,3 +1,7 @@
+mod sealed;
+
+pub use sealed::{OsVaultKeySource, SealedCredentialStore, VaultKeySource};
+
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -7,6 +11,9 @@ use std::{
 };
 
 pub type Result<T> = std::result::Result<T, CredentialsError>;
+
+const SEALED_VAULT_FILE: &str = "vault.sealed";
+const LEGACY_VAULT_FILE: &str = "vault.json";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialsError {
@@ -18,6 +25,75 @@ pub enum CredentialsError {
     Io(#[from] io::Error),
     #[error("credential file JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("OS credential store error: {0}")]
+    Os(#[from] keyring::Error),
+    #[error("credential vault key has an invalid length")]
+    InvalidVaultKey,
+    #[error("failed to generate random bytes for the credential vault")]
+    Random,
+    #[error("failed to encrypt the credential vault")]
+    Seal,
+}
+
+/// Which credential store [`open_credential_store`] selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialBackend {
+    /// Vault file sealed with a key held in the OS credential store.
+    OsCredentialStore,
+    /// Plaintext vault file, used when the OS credential store could not be
+    /// reached before any sealed vault existed.
+    LocalFile { reason: String },
+}
+
+pub struct OpenedCredentialStore {
+    pub store: Arc<dyn CredentialStore>,
+    pub backend: CredentialBackend,
+}
+
+/// Opens the credential store kept in `dir`, preferring the OS credential store.
+///
+/// `os_service` names the OS store entry (normally the app identifier). Once a
+/// sealed vault exists it is always used, so an unavailable OS store surfaces
+/// as an error instead of silently falling back to a plaintext file.
+pub fn open_credential_store(
+    dir: impl AsRef<Path>,
+    os_service: &str,
+) -> Result<OpenedCredentialStore> {
+    open_credential_store_with(dir.as_ref(), Arc::new(OsVaultKeySource::new(os_service)))
+}
+
+fn open_credential_store_with(
+    dir: &Path,
+    key_source: Arc<dyn VaultKeySource>,
+) -> Result<OpenedCredentialStore> {
+    fs::create_dir_all(dir)?;
+    set_private_dir_permissions(dir)?;
+
+    let sealed = SealedCredentialStore::new(
+        dir.join(SEALED_VAULT_FILE),
+        dir.join(LEGACY_VAULT_FILE),
+        key_source,
+    );
+
+    if sealed.path().exists() {
+        return Ok(OpenedCredentialStore {
+            store: Arc::new(sealed),
+            backend: CredentialBackend::OsCredentialStore,
+        });
+    }
+
+    match sealed.initialize() {
+        Ok(()) => Ok(OpenedCredentialStore {
+            store: Arc::new(sealed),
+            backend: CredentialBackend::OsCredentialStore,
+        }),
+        Err(error) => Ok(OpenedCredentialStore {
+            store: Arc::new(LocalCredentialStore::open(dir.join(LEGACY_VAULT_FILE))?),
+            backend: CredentialBackend::LocalFile {
+                reason: error.to_string(),
+            },
+        }),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

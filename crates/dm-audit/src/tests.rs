@@ -332,3 +332,15 @@ fn export_rejects_a_symlinked_store_root_and_keeps_ring_evidence() {
     assert_eq!(manifest["diskUnavailable"], true);
     assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn credential_backend_keeps_only_known_codes() {
+    let kept = sanitize_value(json!({"phase":"credentials","credentialBackend":"os_store"}));
+    assert_eq!(kept["credentialBackend"], "os_store");
+
+    let kept = sanitize_value(json!({"credentialBackend":"local_file"}));
+    assert_eq!(kept["credentialBackend"], "local_file");
+
+    let dropped = sanitize_value(json!({"credentialBackend":"/home/user/secret"}));
+    assert_eq!(dropped["credentialBackend"], "unclassified");
+}

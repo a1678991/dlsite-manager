@@ -1,5 +1,5 @@
 use dm_audit::{AuditEvent, AuditLogger};
-use dm_credentials::{CredentialStore, LocalCredentialStore};
+use dm_credentials::{open_credential_store, CredentialBackend};
 use dm_jobs::{
     JobContext, JobEventKind, JobFailure, JobId, JobLogPage, JobManager, JobMetadata, JobProgress,
 };
@@ -3786,12 +3786,23 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     });
     database.finish(if storage_result.is_ok(){dm_audit::AuditOutcome::Succeeded}else{dm_audit::AuditOutcome::Failed},json!({"phase":"database","failureKind":if storage_result.is_err(){Some("storage")}else{None}}));
     let storage = storage_result?;
-    let credential_vault_path = app_data_dir.join("credentials").join("vault.json");
+    let credential_dir = app_data_dir.join("credentials");
     let mut vault = audit.operation("app.startup");
-    let result = LocalCredentialStore::open(&credential_vault_path);
-    vault.finish(if result.is_ok(){dm_audit::AuditOutcome::Succeeded}else{dm_audit::AuditOutcome::Failed},json!({"phase":"credentials","failureKind":if result.is_err(){Some("credentials")}else{None}}));
-    let credentials: Arc<dyn CredentialStore> = Arc::new(result?);
-    let library = Library::new(storage.clone(), credentials);
+    let result = open_credential_store(&credential_dir, &app.config().identifier);
+    let backend = result.as_ref().ok().map(|opened| match &opened.backend {
+        CredentialBackend::OsCredentialStore => "os_store",
+        CredentialBackend::LocalFile { .. } => "local_file",
+    });
+    vault.finish(if result.is_ok(){dm_audit::AuditOutcome::Succeeded}else{dm_audit::AuditOutcome::Failed},json!({"phase":"credentials","credentialBackend":backend,"failureKind":if result.is_err(){Some("credentials")}else{None}}));
+    let credentials = result?;
+    if let CredentialBackend::LocalFile { reason } = &credentials.backend {
+        tracing::warn!(
+            target: "dlsite_manager::app",
+            %reason,
+            "OS credential store unavailable; using the plaintext credential file"
+        );
+    }
+    let library = Library::new(storage.clone(), credentials.store);
     let jobs = JobManager::default().with_diagnostics(audit.clone());
     let download_reservations = DownloadReservations::default();
 
@@ -3799,7 +3810,8 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         target: "dlsite_manager::app",
         log_dir = %log_dir.display(),
         data_dir = %app_data_dir.display(),
-        credential_vault = %credential_vault_path.display(),
+        credential_dir = %credential_dir.display(),
+        credential_backend = backend.unwrap_or_default(),
         "app setup completed"
     );
     tauri::async_runtime::block_on(record_audit(
